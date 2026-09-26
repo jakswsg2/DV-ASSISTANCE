@@ -1,0 +1,6 @@
+{
+  "name": "DV-Assistance",
+  "description": "A confidential support, safety planning, and resource coordination platform for domestic violence assistance.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
