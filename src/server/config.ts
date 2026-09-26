@@ -29,6 +29,15 @@ export interface ServerConfig {
   readonly sessionCookieName: string;
   readonly sessionSecret: string;
   readonly sessionTtlSeconds: number;
+  /**
+   * Development authentication is disabled by default.
+   *
+   * It must be explicitly enabled with ALLOW_DEV_AUTH=true.
+   *
+   * This prevents accidental exposure of /auth/dev-session
+   * when the application is reachable through a public domain.
+   */
+  readonly allowDevAuth: boolean;
   readonly firebase: FirebaseServerConfig;
   readonly isDev: boolean;
   readonly isProd: boolean;
@@ -36,8 +45,14 @@ export interface ServerConfig {
 }
 
 const rawEnv = process.env.NODE_ENV?.toLowerCase();
-const nodeEnv: 'development' | 'production' | 'test' =
-  rawEnv === 'production' ? 'production' : rawEnv === 'test' ? 'test' : 'development';
+
+if (rawEnv !== 'development' && rawEnv !== 'production' && rawEnv !== 'test') {
+  throw new Error(
+    `Invalid NODE_ENV="${process.env.NODE_ENV ?? ''}". Expected development, production, or test.`
+  );
+}
+
+const nodeEnv = rawEnv as 'development' | 'production' | 'test';
 
 const parsedPort = parseInt(process.env.PORT || '3000', 10);
 const port = Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 3000;
@@ -53,6 +68,33 @@ const isFirebaseConfigured = Boolean(
   firebaseProjectId && (firebaseClientEmail || process.env.GOOGLE_APPLICATION_CREDENTIALS)
 );
 
+/**
+ * Development authentication is disabled by default.
+ *
+ * It must be explicitly enabled with:
+ *   ALLOW_DEV_AUTH=true
+ *
+ * This prevents accidental exposure of /auth/dev-session
+ * when the application is reachable through a public domain.
+ */
+const allowDevAuth = process.env.ALLOW_DEV_AUTH?.toLowerCase() === 'true';
+const sessionSecret =
+      process.env.SESSION_SECRET ||
+      (nodeEnv === 'development'
+        ? 'dv-dev-session-secret-for-local-development-only'
+        : undefined);
+
+    if (nodeEnv === 'production' && !sessionSecret) {
+      throw new Error(
+        'SESSION_SECRET is required in production.'
+      );
+    }
+
+    if (sessionSecret && sessionSecret.length < 32) {
+      throw new Error(
+        'SESSION_SECRET must be at least 32 characters long.'
+      );
+    }
 export const config: ServerConfig = Object.freeze({
   port,
   host: process.env.HOST || '0.0.0.0',
@@ -60,8 +102,9 @@ export const config: ServerConfig = Object.freeze({
   apiPrefix: '/api/v1',
   maxJsonBodySize: process.env.MAX_JSON_BODY_SIZE || '100kb',
   sessionCookieName: 'dv_session',
-  sessionSecret: process.env.SESSION_SECRET || 'dv-dev-session-secret-change-in-production',
+  sessionSecret,
   sessionTtlSeconds: parseInt(process.env.SESSION_TTL_SECONDS || '28800', 10), // 8 hours
+  allowDevAuth,
   firebase: Object.freeze({
     projectId: firebaseProjectId,
     clientEmail: firebaseClientEmail,

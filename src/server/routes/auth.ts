@@ -216,124 +216,169 @@ authRouter.post('/quick-escape-revoke', (req: Request, res: Response) => {
 /**
  * POST /api/v1/auth/dev-session
  * STRICTLY DEVELOPMENT-ONLY: Establishes a session for testing role behaviors in local development.
- * Completely disabled in production environments.
+ * Requires BOTH NODE_ENV=development AND an explicit ALLOW_DEV_AUTH=true opt-in.
+ * Disabled by default in every environment, including production.
  */
 authRouter.post(
   '/dev-session',
   asyncHandler(async (req: Request, res: Response) => {
-    if (!config.isDev) {
+    /**
+     * STRICT DEVELOPMENT-ONLY AUTHENTICATION
+     *
+     * Dev sessions require BOTH:
+     *   1. development environment
+     *   2. explicit ALLOW_DEV_AUTH=true
+     *
+     * ALLOW_DEV_AUTH defaults to false.
+     *
+     * This prevents accidental exposure of the development
+     * authentication endpoint through Cloudflare/public traffic.
+     */
+    if (!config.isDev || !config.allowDevAuth) {
       recordAuditEvent({
         action: 'security:dev_auth_attempt_in_production',
         outcome: 'denied',
         resourceType: 'endpoint',
+        resourceId: req.path,
         requestId: req.requestId,
+        metadata: {
+          environment: config.nodeEnv,
+          allowDevAuth: config.allowDevAuth,
+          path: req.path,
+          method: req.method,
+        },
       });
-      throw new ApiError(403, 'FORBIDDEN', 'Development authentication endpoints are strictly disabled in production.');
+
+      throw new ApiError(
+        403,
+        'DEV_AUTH_DISABLED',
+        'Development authentication is disabled.'
+      );
     }
 
-  const { role } = req.body || {};
-  const validRoles: RoleId[] = ['anonymous', 'client', 'advocate', 'partner', 'admin'];
+    const requestedRole = req.body?.role;
 
-  if (!role || !validRoles.includes(role)) {
-    throw new ApiError(400, 'INVALID_ROLE', `Role must be one of: ${validRoles.join(', ')}`);
-  }
+    const allowedRoles = [
+      'anonymous',
+      'client',
+      'advocate',
+      'partner',
+      'admin',
+    ] as const;
 
-  if (role === 'anonymous') {
-    clearSessionCookie(res);
-    return res.status(200).json({ user: null, isAnonymous: true });
-  }
-
-  // Create or resolve development test user in database
-  const devProviderSub = `dev-${role}-local`;
-  let devUser: { id: string; role: RoleId; status: 'active' | 'suspended' | 'pending'; safeAlias: string };
-
-  if (!dbConfig.isConfigured) {
-    const devIdentity = devDataStore.identities.get(devProviderSub);
-    if (devIdentity) {
-      devUser = devDataStore.users.get(devIdentity.userId)!;
-    } else {
-      const id = `dev-user-${role}-${randomUUID().slice(0, 4)}`;
-      devUser = {
-        id,
-        role,
-        status: 'active',
-        safeAlias: `Dev ${role.charAt(0).toUpperCase() + role.slice(1)} Persona`,
-      };
-      devDataStore.users.set(id, devUser as any);
-      devDataStore.identities.set(devProviderSub, {
-        id: randomUUID(),
-        userId: id,
-        provider: 'dev_local',
-        providerSubjectId: devProviderSub,
-        createdAt: new Date(),
-      });
+    if (
+      typeof requestedRole !== 'string' ||
+      !allowedRoles.includes(requestedRole as (typeof allowedRoles)[number])
+    ) {
+      throw new ApiError(
+        400,
+        'INVALID_DEV_ROLE',
+        'A valid development role is required.'
+      );
     }
-  } else {
-    const existingIdentities = await db
-      .select()
-      .from(userIdentities)
-      .where(and(eq(userIdentities.provider, 'dev_local'), eq(userIdentities.providerSubjectId, devProviderSub)))
-      .limit(1);
 
-    if (existingIdentities.length > 0) {
-      const userRecords = await db.select().from(users).where(eq(users.id, existingIdentities[0].userId)).limit(1);
-      devUser = userRecords[0] as any;
-    } else {
-      const [newUser] = await db
-        .insert(users)
-        .values({
+    // `allowedRoles` mirrors the RoleId union, so the guard above is exhaustive.
+    const isRoleId = (value: string): value is RoleId =>
+      (allowedRoles as readonly string[]).includes(value);
+
+    const role: RoleId = isRoleId(requestedRole) ? requestedRole : 'anonymous';
+
+    if (role === 'anonymous') {
+      clearSessionCookie(res);
+      return res.status(200).json({ user: null, isAnonymous: true });
+    }
+
+    // Create or resolve development test user in database
+    const devProviderSub = `dev-${role}-local`;
+    let devUser: { id: string; role: RoleId; status: 'active' | 'suspended' | 'pending'; safeAlias: string };
+
+    if (!dbConfig.isConfigured) {
+      const devIdentity = devDataStore.identities.get(devProviderSub);
+      if (devIdentity) {
+        devUser = devDataStore.users.get(devIdentity.userId)!;
+      } else {
+        const id = `dev-user-${role}-${randomUUID().slice(0, 4)}`;
+        devUser = {
+          id,
           role,
           status: 'active',
           safeAlias: `Dev ${role.charAt(0).toUpperCase() + role.slice(1)} Persona`,
-        })
-        .returning();
+        };
+        devDataStore.users.set(id, devUser as any);
+        devDataStore.identities.set(devProviderSub, {
+          id: randomUUID(),
+          userId: id,
+          provider: 'dev_local',
+          providerSubjectId: devProviderSub,
+          createdAt: new Date(),
+        });
+      }
+    } else {
+      const existingIdentities = await db
+        .select()
+        .from(userIdentities)
+        .where(and(eq(userIdentities.provider, 'dev_local'), eq(userIdentities.providerSubjectId, devProviderSub)))
+        .limit(1);
 
-      await db.insert(userIdentities).values({
-        userId: newUser.id,
-        provider: 'dev_local',
-        providerSubjectId: devProviderSub,
-      });
+      if (existingIdentities.length > 0) {
+        const userRecords = await db.select().from(users).where(eq(users.id, existingIdentities[0].userId)).limit(1);
+        devUser = userRecords[0] as any;
+      } else {
+        const [newUser] = await db
+          .insert(users)
+          .values({
+            role,
+            status: 'active',
+            safeAlias: `Dev ${role.charAt(0).toUpperCase() + role.slice(1)} Persona`,
+          })
+          .returning();
 
-      devUser = newUser as any;
+        await db.insert(userIdentities).values({
+          userId: newUser.id,
+          provider: 'dev_local',
+          providerSubjectId: devProviderSub,
+        });
+
+        devUser = newUser as any;
+      }
     }
-  }
 
-  const sessionId = randomUUID();
-  const now = Date.now();
-  const sessionToken = createSignedSessionToken({
-    sessionId,
-    userId: devUser.id,
-    firebaseUid: devProviderSub,
-    issuedAt: now,
-    expiresAt: now + config.sessionTtlSeconds * 1000,
-  });
+    const sessionId = randomUUID();
+    const now = Date.now();
+    const sessionToken = createSignedSessionToken({
+      sessionId,
+      userId: devUser.id,
+      firebaseUid: devProviderSub,
+      issuedAt: now,
+      expiresAt: now + config.sessionTtlSeconds * 1000,
+    });
 
-  setSessionCookie(res, sessionToken);
+    setSessionCookie(res, sessionToken);
 
-  recordAuditEvent({
-    action: 'auth:dev_session_established',
-    outcome: 'success',
-    actorUserId: devUser.id,
-    actorRole: role,
-    resourceType: 'dev_session',
-    resourceId: sessionId,
-    requestId: req.requestId,
-  });
+    recordAuditEvent({
+      action: 'auth:dev_session_established',
+      outcome: 'success',
+      actorUserId: devUser.id,
+      actorRole: role,
+      resourceType: 'dev_session',
+      resourceId: sessionId,
+      requestId: req.requestId,
+    });
 
-  const activeRole = devUser.role as RoleId;
-  const roleDef = ROLE_DEFINITIONS[activeRole];
+    const activeRole = devUser.role as RoleId;
+    const roleDef = ROLE_DEFINITIONS[activeRole];
 
-  res.status(200).json({
-    user: {
-      id: devUser.id,
-      safeAlias: devUser.safeAlias,
-      role: activeRole,
-      status: devUser.status,
-      permissions: roleDef.permissions,
-      isAnonymous: false,
-    },
-  });
-})
+    res.status(200).json({
+      user: {
+        id: devUser.id,
+        safeAlias: devUser.safeAlias,
+        role: activeRole,
+        status: devUser.status,
+        permissions: roleDef.permissions,
+        isAnonymous: false,
+      },
+    });
+  })
 );
 
 export default authRouter;
