@@ -1,0 +1,63 @@
+services:
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: dv-assistance-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: dv_assistance
+      POSTGRES_USER: jaksws
+      POSTGRES_PASSWORD: Jjsws1@11
+
+    volumes:
+      - dv_assistance_postgres_data:/var/lib/postgresql/data
+
+    networks:
+      - dv-assistance-network
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U jaksws -d dv_assistance"
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+    # لا ننشر 5432 على Windows.
+    # PostgreSQL متاح فقط داخل شبكة Docker.
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: dv-assistance-app
+    restart: unless-stopped
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    env_file:
+      - .env.docker
+
+    ports:
+      - "3100:3000"
+
+    volumes:
+      - .:/app
+      - dv_assistance_node_modules:/app/node_modules
+
+    networks:
+      - dv-assistance-network
+
+networks:
+  dv-assistance-network:
+    driver: bridge
+
+volumes:
+  dv_assistance_postgres_data:
+  dv_assistance_node_modules:
